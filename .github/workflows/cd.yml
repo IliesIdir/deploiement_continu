@@ -41,8 +41,28 @@ jobs:
           push: true
           tags: ${{ env.IMAGE }}
 
-  deploiement:
+  # On regarde si les secrets de la VM sont configurés.
+  # Sans VM on s'arrête à l'image Docker, le déploiement est juste ignoré au lieu d'échouer.
+  verification-vm:
     needs: build-et-push
+    runs-on: ubuntu-latest
+    outputs:
+      vm_configuree: ${{ steps.verif.outputs.vm_configuree }}
+    steps:
+      - id: verif
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+        run: |
+          if [ -n "$VM_HOST" ]; then
+            echo "vm_configuree=oui" >> $GITHUB_OUTPUT
+          else
+            echo "Pas de VM configurée, le déploiement sera ignoré"
+            echo "vm_configuree=non" >> $GITHUB_OUTPUT
+          fi
+
+  deploiement:
+    needs: verification-vm
+    if: needs.verification-vm.outputs.vm_configuree == 'oui'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

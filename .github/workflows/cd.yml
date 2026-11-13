@@ -1,0 +1,73 @@
+# Pipeline de déploiement continu (niveau 3).
+# Se lance quand la CI est verte sur main : on construit l'image Docker,
+# on la pousse sur le registry GitHub puis on la déploie sur la VM en SSH.
+#
+# Secrets à configurer dans le repo GitHub :
+#   VM_HOST, VM_USER, VM_SSH_KEY : accès SSH à la VM (Docker doit être installé dessus)
+#   GHCR_TOKEN : token avec le droit read:packages pour que la VM puisse pull l'image
+name: CD deploiement
+
+on:
+  workflow_run:
+    workflows: ["CI pipeline data"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-et-push:
+    # On ne déploie que si la CI est passée
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Le registry GitHub refuse les majuscules dans le nom de l'image
+      - name: Nom de l'image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> $GITHUB_ENV
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}
+
+  deploiement:
+    needs: build-et-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nom de l'image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> $GITHUB_ENV
+
+      - name: Copie du docker-compose sur la VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: docker-compose.prod.yml
+          target: ~/transactions
+
+      - name: Lancement des conteneurs sur la VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd ~/transactions
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            export IMAGE=${{ env.IMAGE }}
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --no-build

@@ -1,0 +1,65 @@
+# Setup de production (niveau 3), déployé sur la VM par la pipeline CD.
+# Le mot de passe de la base est lu dans un fichier .env sur la VM (DB_PASSWORD=...).
+
+# Variables communes au traitement et au dashboard, pour ne pas les écrire deux fois
+x-environnement: &environnement
+  DB_HOST: postgres
+  DB_NAME: transactions
+  DB_USER: postgres
+  DB_PASSWORD: ${DB_PASSWORD:-postgres}
+  S3_ENDPOINT: http://s3:8333
+  S3_BUCKET: transactions
+  INTERVALLE_SCHEDULER: ${INTERVALLE_SCHEDULER:-300}
+
+services:
+  s3:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3
+    ports:
+      - "8333:8333"
+    volumes:
+      - s3_data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: transactions
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d transactions"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Le script de traitement qui tourne en boucle et traite les nouveaux fichiers du S3
+  traitement:
+    image: ${IMAGE:-transactions-pipeline:latest}
+    build: .
+    command: python scheduler.py
+    environment: *environnement
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_started
+    restart: unless-stopped
+
+  dashboard:
+    image: ${IMAGE:-transactions-pipeline:latest}
+    command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+    environment: *environnement
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  s3_data:
+  pg_data:

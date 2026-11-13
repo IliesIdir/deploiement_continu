@@ -1,0 +1,82 @@
+# Pipeline d'intégration continue de la pipeline data.
+# Etapes : qualité du code et tests unitaires, puis la vraie pipeline
+# (S3 + base, génération des csv, traitement, insertion) et enfin le test d'intégration.
+name: CI pipeline data
+
+on:
+  push:
+  pull_request:
+  # Lancement manuel, avec une option pour casser volontairement la génération (scénario d'échec)
+  workflow_dispatch:
+    inputs:
+      bug_generation:
+        description: "Générer une donnée fausse pour faire échouer la pipeline"
+        type: boolean
+        default: false
+
+jobs:
+  tests-unitaires:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Installation des dépendances
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: flake8 .
+
+      - name: Tests unitaires
+        run: pytest tests/unit -v
+
+  pipeline:
+    # Pas la peine de lancer la pipeline si les tests unitaires ne passent pas
+    needs: tests-unitaires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Installation de Tesseract (OCR)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr fonts-dejavu-core
+
+      - name: Installation des dépendances
+        run: pip install -r requirements-dev.txt
+
+      - name: Lancement du S3 local et de la base
+        run: |
+          docker compose up -d --wait postgres
+          docker compose up -d s3
+
+      - name: Génération des données et envoi dans le S3
+        env:
+          BUG_GENERATION: ${{ github.event.inputs.bug_generation == 'true' && '1' || '0' }}
+        run: python generate_data.py
+
+      # On active les bugs simulés : le premier téléchargement et la première insertion
+      # vont planter, le retry doit rattraper le coup sans créer de doublons
+      - name: Traitement et insertion en base (avec bugs simulés)
+        env:
+          SIMULER_BUG_S3: "1"
+          SIMULER_BUG_INSERTION: "1"
+        run: python run_pipeline.py
+
+      - name: Test d'intégration sur les données en base
+        run: pytest tests/integration -v
+
+      - name: Logs des conteneurs en cas d'échec
+        if: failure()
+        run: docker compose logs
+
+      - name: Arrêt des services
+        if: always()
+        run: docker compose down -v
